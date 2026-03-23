@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 const FIVETRAN_PLAYBOOK = `OPENER SELECTION - pick the single best one based on profile signals:
 O1: FinOps Crisis - CTOs, FinOps, agency/multi-client roles. Signals: Fivetran mentioned, cost optimization, connection costs. Hook: Have you modeled Fivetran shift to connection-level tiering? Pain: MAR inflation, $5/connection minimums, deleted row billing.
@@ -50,18 +50,6 @@ HARD RULES FOR INITIAL DM:
 - Only reference tools/platforms the prospect themselves uses or builds
 - If the opener angle involves competitor pain (O1, O4), reference the pain pattern generically not by competitor name
 - No em dashes. No bullets. No product pitch before the question. No explaining their stack back to them. Max 90 words.
-"Hey Swapnil,
-
-Thanks for connecting!
-
-Running Glue into both Redshift and Snowflake means your transformation logic lives in two places - and backfilling historical data into one after it's already been processed in the other is where teams usually hit a wall.
-
-We're building Matterbeam (data versioning for AI systems) with my CEO Michael in Boston. When Snowflake needs data that Redshift already processed last month, can you replay that exact pipeline state without rebuilding from scratch?
-
-Best,
-Sai"
-
-WHY THIS WORKS: Names the friction without explaining it. No product pitch before the question. Scenario question is specific and impossible to ignore. Under 75 words. Reads like a peer not a rep.
 
 ---
 
@@ -116,13 +104,6 @@ export default function App() {
   const [replyResult, setReplyResult] = useState("");
   const [replyLoading, setReplyLoading] = useState(false);
 
-  useEffect(() => {
-    try {
-      const local = localStorage.getItem("mb_v6");
-      if (local) setHistory(JSON.parse(local));
-    } catch (e) {}
-  }, []);
-
   const callAPI = async (system, userMsg, maxTokens = 1500) => {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -132,7 +113,7 @@ export default function App() {
         "anthropic-dangerous-direct-browser-access": "true"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         max_tokens: maxTokens,
         system,
         messages: [{ role: "user", content: userMsg }]
@@ -145,34 +126,29 @@ export default function App() {
   };
 
   const extractName = (profileText, resultText) => {
-    const contextMatch = resultText.match(/NAME:\s*([^\n]+)/);
-    const profileMatch = profileText.match(/^([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+){1,3})/m);
-    return contextMatch ? contextMatch[1].trim() : profileMatch ? profileMatch[1].trim() : "Unknown";
+    const ctxMatch = resultText.match(/NAME:\s*([^\n]+)/);
+    const profMatch = profileText.match(/^([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+){1,3})/m);
+    return ctxMatch ? ctxMatch[1].trim() : profMatch ? profMatch[1].trim() : "Unknown";
   };
 
   const saveToHistory = (profileText, resultText) => {
     const name = extractName(profileText, resultText);
-    const decisionMatch = resultText.match(/\*\*DECISION:\*\*(.*?)---/s);
-    const decision = decisionMatch ? decisionMatch[1].trim().substring(0, 80) : "";
-    const existingIndex = history.findIndex(h => h.name.toLowerCase().trim() === name.toLowerCase().trim());
-    if (existingIndex !== -1) {
-      const updated = [...history];
-      updated[existingIndex] = { ...updated[existingIndex], result: resultText, decision, profile: profileText, date: new Date().toLocaleDateString() };
-      setHistory(updated);
-      try { localStorage.setItem("mb_v6", JSON.stringify(updated)); } catch (e) {}
-      return;
-    }
-    const entry = { id: Date.now(), name, decision, profile: profileText, result: resultText, date: new Date().toLocaleDateString(), status: "Pending", conversation: [] };
-    const updated = [entry, ...history].slice(0, 100);
-    setHistory(updated);
-    try { localStorage.setItem("mb_v6", JSON.stringify(updated)); } catch (e) {}
+    const decMatch = resultText.match(/\*\*DECISION:\*\*(.*?)---/s);
+    const decision = decMatch ? decMatch[1].trim().substring(0, 80) : "";
+    setHistory(prev => {
+      const existIdx = prev.findIndex(h => h.name.toLowerCase().trim() === name.toLowerCase().trim());
+      if (existIdx !== -1) {
+        const updated = [...prev];
+        updated[existIdx] = { ...updated[existIdx], result: resultText, decision, profile: profileText, date: new Date().toLocaleDateString() };
+        return updated;
+      }
+      return [{ id: Date.now(), name, decision, profile: profileText, result: resultText, date: new Date().toLocaleDateString(), status: "Pending", conversation: [] }, ...prev].slice(0, 100);
+    });
   };
 
   const updateHistory = (id, changes) => {
-    const updated = history.map(h => h.id === id ? { ...h, ...changes } : h);
-    setHistory(updated);
-    if (selectedHistory?.id === id) setSelectedHistory(prev => ({ ...prev, ...changes }));
-    try { localStorage.setItem("mb_v6", JSON.stringify(updated)); } catch (e) {}
+    setHistory(prev => prev.map(h => h.id === id ? { ...h, ...changes } : h));
+    setSelectedHistory(prev => prev?.id === id ? { ...prev, ...changes } : prev);
   };
 
   const analyze = async () => {
@@ -182,9 +158,9 @@ export default function App() {
     setResult("");
     try {
       setLoadingMsg("Analyzing profile...");
-      const raw = await callAPI(SYSTEM_PROMPT, \`Analyze this LinkedIn profile and generate all 4 outreach components:\n\n\${profile}\`, 1800);
+      const raw = await callAPI(SYSTEM_PROMPT, `Analyze this LinkedIn profile and generate all 4 outreach components:\n\n${profile}`, 1800);
       setLoadingMsg("Validating messages...");
-      const validated = await callAPI(VALIDATOR_PROMPT, \`Fix this outreach output to match all rules exactly:\n\n\${raw}\`, 1000);
+      const validated = await callAPI(VALIDATOR_PROMPT, `Fix this outreach output to match all rules exactly:\n\n${raw}`, 1000);
       setResult(validated);
       saveToHistory(profile, validated);
     } catch (e) {
@@ -201,43 +177,40 @@ export default function App() {
     const secs = parseResult(entry.result);
     const ctx = secs.find(s => s.id === "context")?.content || "";
     const conv = entry.conversation || [];
-    const prev = conv.map(c => \`\${c.from}: \${c.text}\`).join("\n");
-    
-    // Count how many times Sai has already followed up
+    const prev = conv.map(c => `${c.from}: ${c.text}`).join("\n");
     const saiMessages = conv.filter(c => c.from === "Sai").length;
     const followUpLevel = saiMessages === 0 ? 1 : saiMessages === 1 ? 2 : saiMessages >= 2 ? 3 : 1;
-    
-    const followUpInstructions = \`
-FOLLOW-UP LEVEL RULES (based on conversation history):
-Current follow-up level: \${followUpLevel}
-Sai has sent \${saiMessages} message(s) so far.
 
-Level 1 (first follow-up, no reply): Soft bump. Assume good intent. Reframe as a simpler binary question. Under 40 words. No calendar link yet.
-Level 2 (second follow-up, still no reply): Pattern interrupt. Completely fresh angle. Make them curious. Under 35 words. No calendar link yet.
-Level 3 (third follow-up, still no reply): Graceful exit. Remove all pressure. Leave door open. Under 30 words. Include calendar link as optional resource.
-Level 4+ (already sent 3 follow-ups): Tell Sai to STOP. Output: "You have sent 3 follow-ups with no response. Move this prospect to No Response status and move on. Continuing to message will hurt your reputation."
+    const followUpInstructions = `
+FOLLOW-UP LEVEL RULES:
+Current follow-up level: ${followUpLevel}
+Sai has sent ${saiMessages} message(s) so far.
+
+Level 1 (first follow-up, no reply): Soft bump. Reframe as binary question. Under 40 words. No calendar link yet.
+Level 2 (second follow-up, still no reply): Pattern interrupt. Fresh angle. Make them curious. Under 35 words. No calendar link yet.
+Level 3 (third follow-up, still no reply): Graceful exit. Remove all pressure. Leave door open. Under 30 words. Include calendar link as optional.
+Level 4+ (already sent 3 follow-ups): Tell Sai to STOP. Output: "You have sent 3 follow-ups with no response. Move this prospect to No Response status and move on."
 
 TOP 1% FOLLOW-UP RULES:
 - Each message MUST be shorter than the previous one
-- Never say "just following up on my previous message" more than once
-- Never pitch harder when ignored - always lighter touch
 - Never guilt or pressure - always give an easy out
-- Binary questions get more replies than open questions
-- Graceful exits often get the highest reply rate because they remove pressure
-- Today's no is next quarter's yes - always leave on good terms\`;
+- Graceful exits often get the highest reply rate
+- Today's no is next quarter's yes - always leave on good terms`;
 
-    const prompt = \`Prospect context:\n\${ctx}\n\nConversation so far:\n\${prev}\n\nTheir latest input:\n\${replyInput}\n\n\${followUpInstructions}\n\nGoal: book meeting ASAP but follow the level rules above. If they described any pain connect it to Matterbeam and ask for 15-20 mins with Alex. No em dashes. No bullets. Calendar link only when appropriate per level rules: https://app.apollo.io/#/meet/vde-uj0-nj8/30-min\n\n**STAGE:** [Cold/Engaged/Pain described/Pain confirmed/Ready to book/STOP]\n**ANALYSIS:** [1-2 sentences on situation and which level is being used]\n**NEXT MESSAGE:**\n[message or STOP instruction]\`;
+    const prompt = `Prospect context:\n${ctx}\n\nConversation so far:\n${prev}\n\nTheir latest input:\n${replyInput}\n\n${followUpInstructions}\n\nGoal: book meeting ASAP but follow the level rules above. If they described any pain connect it to Matterbeam and ask for 15-20 mins with Alex. No em dashes. No bullets. Calendar link only when appropriate: https://app.apollo.io/#/meet/vde-uj0-nj8/30-min\n\n**STAGE:** [Cold/Engaged/Pain described/Pain confirmed/Ready to book/STOP]\n**ANALYSIS:** [1-2 sentences on situation and which level is being used]\n**NEXT MESSAGE:**\n[message or STOP instruction]`;
     try {
       const text = await callAPI("You are a top 1% SDR helping book meetings for Matterbeam. Follow the follow-up level rules exactly. Direct, peer-to-peer, no em dashes, no bullets.", prompt, 600);
       setReplyResult(text);
       updateHistory(entry.id, { conversation: [...conv, { from: "Them", text: replyInput }] });
       setReplyInput("");
-    } catch (e) { setReplyResult("Error. Please try again."); }
+    } catch (e) {
+      setReplyResult("Error. Please try again.");
+    }
     setReplyLoading(false);
   };
 
   const saveReplyToConvo = (entry, replyText) => {
-    const msgMatch = replyText.match(/\\*\\*NEXT MESSAGE:\\*\\*\n([\\s\\S]+)/);
+    const msgMatch = replyText.match(/\*\*NEXT MESSAGE:\*\*\n([\s\S]+)/);
     const msg = msgMatch ? msgMatch[1].trim() : replyText;
     updateHistory(entry.id, { conversation: [...(entry.conversation || []), { from: "Sai", text: msg }] });
     setReplyResult("");
@@ -264,9 +237,9 @@ TOP 1% FOLLOW-UP RULES:
   };
 
   const parseReply = (text) => {
-    const stage = (text.match(/\\*\\*STAGE:\\*\\*\\s*([^\\n]+)/) || [])[1]?.trim() || "";
-    const analysis = (text.match(/\\*\\*ANALYSIS:\\*\\*\\s*([\\s\\S]+?)\\*\\*NEXT MESSAGE:\\*\\*/) || [])[1]?.trim() || "";
-    const message = (text.match(/\\*\\*NEXT MESSAGE:\\*\\*\n([\\s\\S]+)/) || [])[1]?.trim() || text;
+    const stage = (text.match(/\*\*STAGE:\*\*\s*([^\n]+)/) || [])[1]?.trim() || "";
+    const analysis = (text.match(/\*\*ANALYSIS:\*\*\s*([\s\S]+?)\*\*NEXT MESSAGE:\*\*/) || [])[1]?.trim() || "";
+    const message = (text.match(/\*\*NEXT MESSAGE:\*\*\n([\s\S]+)/) || [])[1]?.trim() || text;
     return { stage, analysis, message };
   };
 
@@ -276,23 +249,23 @@ TOP 1% FOLLOW-UP RULES:
     const rows = history.map(h => {
       const secs = parseResult(h.result);
       const get = id => (secs.find(s => s.id === id)?.content || "").replace(/"/g, '""');
-      return [\`"\${h.name}"\`,\`"\${h.date}"\`,\`"\${h.status}"\`,\`"\${get("decision")}"\`,\`"\${get("comment")}"\`,\`"\${get("dm")}"\`,\`"\${get("followup")}"\`,\`"\${get("context")}"\`].join(",");
+      return [`"${h.name}"`,`"${h.date}"`,`"${h.status}"`,`"${get("decision")}"`,`"${get("comment")}"`,`"${get("dm")}"`,`"${get("followup")}"`,`"${get("context")}"`].join(",");
     });
     const blob = new Blob([[headers.join(","), ...rows].join("\n")], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = \`matterbeam_\${new Date().toISOString().slice(0,10)}.csv\`;
+    a.download = `matterbeam_${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const C = {
     decision: { bg: "#f0f9ff", border: "#0ea5e9", label: "#0369a1" },
-    comment: { bg: "#f0fdf4", border: "#22c55e", label: "#15803d" },
-    dm: { bg: "#faf5ff", border: "#a855f7", label: "#7e22ce" },
+    comment:  { bg: "#f0fdf4", border: "#22c55e", label: "#15803d" },
+    dm:       { bg: "#faf5ff", border: "#a855f7", label: "#7e22ce" },
     followup: { bg: "#fff7ed", border: "#f97316", label: "#c2410c" },
-    context: { bg: "#fefce8", border: "#eab308", label: "#854d0e" }
+    context:  { bg: "#fefce8", border: "#eab308", label: "#854d0e" }
   };
 
   const SC = { "Pending":"#94a3b8","Comment sent":"#22c55e","DM sent":"#a855f7","Follow-up sent":"#f97316","Meeting booked":"#0ea5e9","No response":"#ef4444" };
@@ -309,7 +282,6 @@ TOP 1% FOLLOW-UP RULES:
 
   const SectionCard = ({ sec }) => {
     const c = C[sec.id] || { bg: "#f8fafc", border: "#94a3b8", label: "#475569" };
-    
     let postLabel = null;
     let commentText = sec.content;
     if (sec.id === "comment" && sec.content.includes("POST TO COMMENT ON:")) {
@@ -318,13 +290,12 @@ TOP 1% FOLLOW-UP RULES:
       postLabel = postLine ? postLine.replace("POST TO COMMENT ON:", "").trim() : null;
       commentText = lines.filter(l => !l.startsWith("POST TO COMMENT ON:")).join("\n").trim();
     }
-
     return (
-      <div style={{ background: c.bg, border: \`1.5px solid \${c.border}\`, borderRadius: 12, padding: 18, marginBottom: 12 }}>
+      <div style={{ background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 12, padding: 18, marginBottom: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <span style={{ fontWeight: 700, fontSize: 11, color: c.label, textTransform: "uppercase", letterSpacing: "0.07em" }}>{sec.label}</span>
           {sec.id !== "decision" && (
-            <button onClick={() => copyText(commentText || sec.content, sec.id)} style={{ fontSize: 12, padding: "4px 14px", borderRadius: 6, border: \`1px solid \${c.border}\`, background: "#fff", color: c.label, cursor: "pointer", fontWeight: 600 }}>
+            <button onClick={() => copyText(commentText || sec.content, sec.id)} style={{ fontSize: 12, padding: "4px 14px", borderRadius: 6, border: `1px solid ${c.border}`, background: "#fff", color: c.label, cursor: "pointer", fontWeight: 600 }}>
               {copied === sec.id ? "Copied!" : "Copy"}
             </button>
           )}
@@ -351,7 +322,7 @@ TOP 1% FOLLOW-UP RULES:
           {history.length > 0 && <button onClick={downloadCSV} style={{ padding: "7px 16px", borderRadius: 8, border: "1px solid #22c55e", background: "#f0fdf4", color: "#15803d", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>Export CSV</button>}
           {["generator","history"].map(v => (
             <button key={v} onClick={() => setView(v)} style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: view === v ? "#0f172a" : "#e2e8f0", color: view === v ? "#fff" : "#475569", fontWeight: 600, fontSize: 13, cursor: "pointer", textTransform: "capitalize" }}>
-              {v === "history" ? \`History (\${history.length})\` : "Generator"}
+              {v === "history" ? `History (${history.length})` : "Generator"}
             </button>
           ))}
         </div>
@@ -385,7 +356,7 @@ TOP 1% FOLLOW-UP RULES:
       {view === "history" && !selectedHistory && (
         <div>
           <div style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>Click any prospect to view outreach, paste replies, and get next messages.</div>
-          {history.length === 0 && <div style={{ textAlign: "center", padding: 60, color: "#94a3b8", fontSize: 14 }}>No profiles generated yet.</div>}
+          {history.length === 0 && <div style={{ textAlign: "center", padding: 60, color: "#94a3b8", fontSize: 14 }}>No profiles generated yet. Note: history resets on page refresh.</div>}
           {history.map(h => (
             <div key={h.id} onClick={() => { setSelectedHistory(h); setReplyResult(""); setReplyInput(""); }} style={{ background: "#fff", borderRadius: 10, padding: "14px 18px", marginBottom: 8, boxShadow: "0 1px 2px rgba(0,0,0,0.06)", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", border: "1.5px solid #e2e8f0" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -399,13 +370,11 @@ TOP 1% FOLLOW-UP RULES:
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 {(h.conversation||[]).length > 0 && <span style={{ fontSize: 11, color: "#0ea5e9", fontWeight: 600 }}>{h.conversation.length} msgs</span>}
-                <span style={{ fontSize: 11, fontWeight: 700, color: SC[h.status], background: "#f8fafc", padding: "3px 10px", borderRadius: 20, border: \`1px solid \${SC[h.status]}\`, whiteSpace: "nowrap" }}>{h.status}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: SC[h.status], background: "#f8fafc", padding: "3px 10px", borderRadius: 20, border: `1px solid ${SC[h.status]}`, whiteSpace: "nowrap" }}>{h.status}</span>
                 <span style={{ color: "#cbd5e1" }}>›</span>
                 <button onClick={e => {
                   e.stopPropagation();
-                  const updated = history.filter(x => x.id !== h.id);
-                  setHistory(updated);
-                  try { localStorage.setItem("mb_v6", JSON.stringify(updated)); } catch (err) {}
+                  setHistory(prev => prev.filter(x => x.id !== h.id));
                 }} style={{ marginLeft: 4, padding: "3px 8px", borderRadius: 6, border: "1px solid #fecaca", background: "#fff1f2", color: "#ef4444", fontWeight: 700, fontSize: 11, cursor: "pointer" }}>✕</button>
               </div>
             </div>
@@ -457,7 +426,7 @@ TOP 1% FOLLOW-UP RULES:
               <div style={{ background: "#faf5ff", border: "1.5px solid #a855f7", borderRadius: 12, padding: 18, marginBottom: 14 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                   <span style={{ fontWeight: 700, fontSize: 12, color: "#7e22ce", textTransform: "uppercase", letterSpacing: "0.07em" }}>Next Message</span>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: GC[p.stage] || "#94a3b8", background: "#f8fafc", padding: "3px 10px", borderRadius: 20, border: \`1px solid \${GC[p.stage] || "#e2e8f0"}\` }}>{p.stage}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: GC[p.stage] || "#94a3b8", background: "#f8fafc", padding: "3px 10px", borderRadius: 20, border: `1px solid ${GC[p.stage] || "#e2e8f0"}` }}>{p.stage}</span>
                 </div>
                 {p.analysis && <div style={{ fontSize: 12, color: "#64748b", marginBottom: 12, fontStyle: "italic" }}>{p.analysis}</div>}
                 <div style={{ fontSize: 13, color: "#1e293b", lineHeight: 1.75, whiteSpace: "pre-wrap", marginBottom: 12 }}>{p.message}</div>
