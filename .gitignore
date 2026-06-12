@@ -2,3 +2,18 @@ node_modules
 dist
 .DS_Store
 .env
+
+# Python automation outputs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.chrome-automation-profile/
+results.xlsx
+results.csv
+processed_profiles.json
+prospects.db
+pinned_tabs.json
+logs/*.log
+screenshots/*.png
+audits/
