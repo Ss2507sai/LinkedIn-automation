@@ -32,6 +32,7 @@ from src.errors import (
 from src.logger import get_logger
 from src.screenshots import capture_error_screenshot
 from src.session_setup import setup_session
+from src.sn_investigation import diagnose_sn_page
 from src.tab_registry import TabRegistry
 from src.utils import dismiss_linkedin_popups, human_delay, wait_for_network_idle
 from storage.result_storage import ResultStorage
@@ -81,10 +82,12 @@ class AutomationOrchestrator:
             self.browser.bring_to_front(sales_nav_page)
             sales_scraper = SalesNavigatorScraper(sales_nav_page, self.settings)
             self._update_page_number(sales_scraper)
+            diagnose_sn_page(sales_nav_page, "session_start")
 
             while self._running:
                 try:
                     self.control.check_checkpoint("Reading Sales Navigator results")
+                    diagnose_sn_page(sales_nav_page, "loop_iteration_before_scrape")
                     prospects = self._get_prospects_with_recovery(sales_scraper, sales_nav_page)
                     unprocessed = [
                         p
@@ -164,9 +167,11 @@ class AutomationOrchestrator:
             return sales_scraper.get_visible_prospects()
         except ScrapingError as exc:
             logger.warning("Results scrape failed: %s — refreshing page", exc)
+            diagnose_sn_page(sales_nav_page, "before_refresh_on_scrape_fail")
             sales_nav_page.reload(wait_until="domcontentloaded")
             wait_for_network_idle(sales_nav_page)
             dismiss_linkedin_popups(sales_nav_page)
+            diagnose_sn_page(sales_nav_page, "after_refresh_on_scrape_fail")
             return sales_scraper.get_visible_prospects()
 
     def _update_page_number(self, sales_scraper: SalesNavigatorScraper) -> None:
@@ -273,7 +278,8 @@ class AutomationOrchestrator:
                         )
 
                         parsed, prompt, raw_response = self._generate_connection_request(
-                            profile_data
+                            profile_data,
+                            prospect_name=prospect_name,
                         )
                         connection_request = parsed.connection_request
                         logger.info("Step: CONNECTION_REQUEST parsed (%d chars)", len(connection_request))
@@ -297,6 +303,7 @@ class AutomationOrchestrator:
                         dismiss_linkedin_popups(sales_nav_page)
                         sales_nav_page.wait_for_timeout(1000)
 
+                        diagnose_sn_page(sales_nav_page, "before_invitation_send")
                         logger.info("Step: open three-dot menu → Connect")
                         self.control.check_checkpoint("Opening connect dialog")
                         connect_sender.open_connect_dialog(prospect)
@@ -315,9 +322,11 @@ class AutomationOrchestrator:
                                 prospect_name,
                             )
                             connect_sender.close_dialog()
+                            diagnose_sn_page(sales_nav_page, "after_invitation_dry_run_close")
                         else:
                             self.control.check_checkpoint("Sending connection invitation")
                             connect_sender.send_invitation()
+                            diagnose_sn_page(sales_nav_page, "after_invitation_send")
                             status = CONNECTION_SENT
                             self.storage.save_connection_sent(
                                 name=prospect_name,
@@ -351,6 +360,7 @@ class AutomationOrchestrator:
                         )
 
                         self.browser.bring_to_front(sales_nav_page)
+                        diagnose_sn_page(sales_nav_page, "after_profile_complete_before_next")
                         self.control.check_checkpoint("Ready for next prospect")
                         human_delay(self.settings)
                         return
@@ -402,6 +412,12 @@ class AutomationOrchestrator:
 
                         self._record_failure(prospect, exc)
                         self.browser.bring_to_front(sales_nav_page)
+                        if not self.settings.connect_dry_run:
+                            logger.error(
+                                "Live run failure on %s — stopping automation",
+                                prospect.name,
+                            )
+                            self._running = False
                         return
 
                 return
@@ -415,7 +431,12 @@ class AutomationOrchestrator:
                         pass
                 raise
 
-    def _generate_connection_request(self, profile_data: ProfileData):
+    def _generate_connection_request(
+        self,
+        profile_data: ProfileData,
+        *,
+        prospect_name: str = "",
+    ):
         """Submit profile to pinned ChatGPT conversation — never reload or new tab."""
         if self.chatgpt_client is None:
             raise ChatGPTError("ChatGPT client not initialized")
@@ -423,7 +444,10 @@ class AutomationOrchestrator:
         self.control.check_checkpoint("Submitting profile to ChatGPT")
         self.browser.bring_to_front(self.registry.chatgpt_page)
 
-        return self.chatgpt_client.submit_profile(profile_data.to_structured_text())
+        return self.chatgpt_client.submit_profile(
+            profile_data.to_structured_text(),
+            prospect_label=prospect_name or profile_data.full_name,
+        )
 
     @staticmethod
     def _merge_card_metadata(profile_data: ProfileData, prospect: ProspectCard) -> None:

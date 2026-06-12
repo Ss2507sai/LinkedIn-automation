@@ -69,17 +69,24 @@ class SalesNavigatorScraper:
 
     def wait_for_results(self) -> None:
         """Wait until search results are visible."""
+        from src.sn_investigation import capture_sn_failure_artifacts, diagnose_sn_page
+
         self.ensure_search_results_page()
         dismiss_linkedin_popups(self.page)
         wait_for_network_idle(self.page, timeout_ms=15_000)
 
+        diagnose_sn_page(self.page, "wait_for_results_before_selectors")
+
         for selector in self.CARD_SELECTORS:
             try:
                 self.page.locator(selector).first.wait_for(state="visible", timeout=15_000)
+                diagnose_sn_page(self.page, f"wait_for_results_matched_{selector[:30]}")
                 return
             except Exception:
                 continue
 
+        diagnose_sn_page(self.page, "wait_for_results_FAILED")
+        capture_sn_failure_artifacts(self.page, self.settings, "results_not_found")
         raise ScrapingError("Sales Navigator results not found on page")
 
     def get_visible_prospects(self) -> list[ProspectCard]:

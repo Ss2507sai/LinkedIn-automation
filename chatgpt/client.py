@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from config.prompts import MASTER_INSTRUCTIONS, build_profile_submission
-from src.errors import ChatGPTError
+from src.errors import ChatGPTError, ParseError
 from src.logger import get_logger
 from src.utils import human_delay
 
@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 
     from config.settings import Settings
 
+from chatgpt.diagnostics import (
+    ChatGPTRunMetrics,
+    capture_parse_failure_artifacts,
+    capture_timeout_artifacts,
+)
 from chatgpt.parser import ParsedResponse, parse_chatgpt_response
 from chatgpt.waiter import _count_assistant_messages, _is_generating, wait_for_generation_complete
 
@@ -85,10 +90,31 @@ class ChatGPTClient:
         self._conversation_ready = True
         logger.info("ChatGPT conversation initialized with master instructions")
 
-    def submit_profile(self, profile_data: str) -> tuple[ParsedResponse, str, str]:
+    def submit_profile(
+        self,
+        profile_data: str,
+        *,
+        prospect_label: str = "",
+    ) -> tuple[ParsedResponse, str, str]:
         """Paste profile data only, submit once, wait for CONNECTION_REQUEST."""
         if not self._conversation_ready:
             raise ChatGPTError("ChatGPT conversation not initialized — run setup_conversation first")
+
+        from datetime import datetime, timezone
+
+        metrics = ChatGPTRunMetrics(prospect_label=prospect_label or "unknown")
+        metrics.submission_ts = (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        )
+        metrics.assistant_count_before = _count_assistant_messages(self.page)
+        pre_submit_latest = ""
+        if metrics.assistant_count_before > 0:
+            from chatgpt.waiter import _get_latest_response_text as _latest_text
+
+            pre_submit_latest = _latest_text(
+                self.page,
+                min_index=max(0, metrics.assistant_count_before - 1),
+            )
 
         message = build_profile_submission(profile_data)
         self.page.bring_to_front()
@@ -97,18 +123,71 @@ class ChatGPTClient:
         self._clear_text_input()
         self._type_prompt(message)
 
-        baseline = _count_assistant_messages(self.page)
-        logger.info("ChatGPT profile submitted (%d chars)", len(message))
+        baseline = metrics.assistant_count_before
+        logger.info(
+            "ChatGPT profile submitted (%d chars) prospect=%r baseline_assistant_count=%d ts=%s",
+            len(message),
+            prospect_label,
+            baseline,
+            metrics.submission_ts,
+        )
         self._submit_once(baseline_messages=baseline)
 
-        raw_response = wait_for_generation_complete(
-            self.page,
-            self.settings,
-            baseline_message_count=baseline,
-            require_marker="CONNECTION_REQUEST",
+        metrics.assistant_count_after_submit = _count_assistant_messages(self.page)
+        logger.info(
+            "CGPT_DIAG after_submit assistant_count=%d generating=%s",
+            metrics.assistant_count_after_submit,
+            _is_generating(self.page),
         )
-        logger.info("ChatGPT CONNECTION_REQUEST received")
-        return parse_chatgpt_response(raw_response), message, raw_response
+
+        try:
+            raw_response = wait_for_generation_complete(
+                self.page,
+                self.settings,
+                baseline_message_count=baseline,
+                require_marker="CONNECTION_REQUEST",
+                pre_submit_latest_text=pre_submit_latest,
+                metrics=metrics,
+            )
+        except ChatGPTError:
+            metrics.outcome = "timeout"
+            metrics.error = "ChatGPTTimeoutError"
+            metrics.log_summary()
+            capture_timeout_artifacts(
+                self.page,
+                self.settings,
+                prospect_label=prospect_label or "unknown",
+                metrics=metrics,
+                baseline_message_count=baseline,
+            )
+            raise
+
+        metrics.assistant_count_after_submit = _count_assistant_messages(self.page)
+        try:
+            parsed = parse_chatgpt_response(raw_response)
+        except ParseError as exc:
+            metrics.outcome = "parse_fail"
+            metrics.error = str(exc)
+            metrics.response_chars = len(raw_response)
+            metrics.log_summary()
+            capture_parse_failure_artifacts(
+                self.page,
+                self.settings,
+                prospect_label=prospect_label or "unknown",
+                raw_response=raw_response,
+                metrics=metrics,
+            )
+            raise
+
+        metrics.outcome = "success"
+        metrics.connection_request_chars = len(parsed.connection_request)
+        metrics.log_summary()
+        logger.info(
+            "ChatGPT CONNECTION_REQUEST received (%d chars) in %.1fs",
+            metrics.connection_request_chars,
+            metrics.time_to_response_sec or 0,
+        )
+        return parsed, message, raw_response
 
     def generate_outreach(
         self,
