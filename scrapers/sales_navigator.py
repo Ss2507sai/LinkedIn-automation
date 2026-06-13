@@ -161,43 +161,64 @@ class SalesNavigatorScraper:
         dismiss_linkedin_popups(self.page)
         self.page.bring_to_front()
 
+        # SN renders multiple pagers (e.g. a secondary "Page X of 2" control).
+        # Target the main search-results pager, not the first visible Next button.
         next_selectors = [
+            (
+                "div.artdeco-pagination:not(.artdeco-pagination--hide-pagination) "
+                "button.artdeco-pagination__button--next"
+            ),
+            (
+                "div.artdeco-pagination:not(.artdeco-pagination--hide-pagination) "
+                'button[aria-label="Next"]'
+            ),
             'button[aria-label="Next"]',
             'button.artdeco-pagination__button--next',
             'button:has-text("Next")',
             'li.artdeco-pagination__indicator--number + li button',
         ]
 
+        saw_disabled = False
         for selector in next_selectors:
             try:
-                button = self.page.locator(selector).first
-                if not button.is_visible(timeout=3000):
-                    continue
+                buttons = self.page.locator(selector)
+                for i in range(buttons.count()):
+                    button = buttons.nth(i)
+                    if not button.is_visible(timeout=1000):
+                        continue
 
-                disabled = button.get_attribute("disabled")
-                aria_disabled = button.get_attribute("aria-disabled")
-                if disabled is not None or aria_disabled == "true":
-                    logger.info("Next button is disabled — no more pages")
-                    return False
+                    disabled = button.get_attribute("disabled")
+                    aria_disabled = button.get_attribute("aria-disabled")
+                    button_class = button.get_attribute("class") or ""
+                    if (
+                        disabled is not None
+                        or aria_disabled == "true"
+                        or "artdeco-button--disabled" in button_class
+                    ):
+                        saw_disabled = True
+                        continue
 
-                current_url = self.page.url
-                button.click(timeout=5000)
-                logger.info("Pagination: clicked Next")
+                    current_url = self.page.url
+                    button.click(timeout=5000)
+                    logger.info("Pagination: clicked Next")
 
-                self.page.wait_for_timeout(1000)
-                wait_for_network_idle(self.page)
+                    self.page.wait_for_timeout(1000)
+                    wait_for_network_idle(self.page)
 
-                if self.page.url != current_url:
+                    if self.page.url != current_url:
+                        return True
+
+                    # URL may not change; wait for list refresh
+                    self.wait_for_results()
                     return True
-
-                # URL may not change; wait for list refresh
-                self.wait_for_results()
-                return True
 
             except Exception:
                 continue
 
-        logger.info("Next button not found — pagination complete")
+        if saw_disabled:
+            logger.info("Next button is disabled — no more pages")
+        else:
+            logger.info("Next button not found — pagination complete")
         return False
 
     def get_result_card_count(self) -> int:
