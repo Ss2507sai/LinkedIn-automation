@@ -96,6 +96,9 @@ class AutomationOrchestrator:
                     ]
 
                     if not unprocessed:
+                        if self._try_scroll_for_unprocessed(sales_scraper):
+                            continue
+
                         logger.info("All visible prospects processed — attempting pagination")
                         self.control.check_checkpoint("Paginating")
                         if not sales_scraper.click_next_page():
@@ -173,6 +176,48 @@ class AutomationOrchestrator:
             dismiss_linkedin_popups(sales_nav_page)
             diagnose_sn_page(sales_nav_page, "after_refresh_on_scrape_fail")
             return sales_scraper.get_visible_prospects()
+
+    def _try_scroll_for_unprocessed(
+        self,
+        sales_scraper: SalesNavigatorScraper,
+    ) -> bool:
+        """
+        Scroll the SN results pane until an eligible prospect appears.
+
+        Returns True when scrolling revealed a new unprocessed prospect.
+        """
+        max_attempts = 30
+        for _ in range(max_attempts):
+            if self._should_stop():
+                return False
+
+            logger.info("No eligible visible prospects - scrolling results pane")
+            previous_count = sales_scraper.get_result_card_count()
+            did_scroll, at_end = sales_scraper.scroll_results_pane()
+
+            if not did_scroll:
+                if at_end:
+                    logger.info("End of results reached")
+                return False
+
+            human_delay(self.settings)
+            sales_scraper.wait_for_new_cards_after_scroll(previous_count)
+
+            prospects = sales_scraper.get_visible_prospects()
+            unprocessed = [
+                p
+                for p in prospects
+                if not self.storage.is_connection_sent(p.profile_url)
+            ]
+            if unprocessed:
+                return True
+
+            if at_end or sales_scraper.is_results_pane_at_end():
+                logger.info("End of results reached")
+                return False
+
+        logger.info("End of results reached")
+        return False
 
     def _update_page_number(self, sales_scraper: SalesNavigatorScraper) -> None:
         self.control.update(page_number=sales_scraper.get_current_page_number())

@@ -43,6 +43,14 @@ class SalesNavigatorScraper:
         "div.search-results-container li.artdeco-list__item",
     ]
 
+    RESULTS_PANE_SELECTORS = [
+        "div[data-x--search-results-container]",
+        "div.search-results__result-list",
+        "div.search-results-container",
+        "div.search-results__container",
+        "ol.artdeco-list",
+    ]
+
     def __init__(self, page: Page, settings: Settings) -> None:
         self.page = page
         self.settings = settings
@@ -191,6 +199,162 @@ class SalesNavigatorScraper:
 
         logger.info("Next button not found — pagination complete")
         return False
+
+    def get_result_card_count(self) -> int:
+        """Count prospect list items currently in the DOM."""
+        self.ensure_search_results_page()
+        return self._find_result_items().count()
+
+    def scroll_results_pane(self) -> tuple[bool, bool]:
+        """
+        Scroll the SN results container down by ~one viewport height.
+
+        Uses the inner results pane only (never window.scrollBy).
+
+        Returns:
+            (did_scroll, at_end) — did_scroll is False if no movement occurred.
+        """
+        self.ensure_search_results_page()
+        self.page.bring_to_front()
+        dismiss_linkedin_popups(self.page)
+
+        result = self.page.evaluate(
+            """(selectors) => {
+                function isScrollable(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const oy = style.overflowY;
+                    return (
+                        (oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+                        && el.scrollHeight > el.clientHeight + 10
+                    );
+                }
+
+                let target = null;
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (isScrollable(el)) {
+                        target = el;
+                        break;
+                    }
+                }
+
+                if (!target) {
+                    const li = document.querySelector(
+                        'ol.artdeco-list li.artdeco-list__item'
+                    );
+                    let node = li ? li.parentElement : null;
+                    while (node && node !== document.body) {
+                        if (isScrollable(node)) {
+                            target = node;
+                            break;
+                        }
+                        node = node.parentElement;
+                    }
+                }
+
+                if (!target) {
+                    return { found: false, did_scroll: false, at_end: true };
+                }
+
+                const beforeTop = target.scrollTop;
+                const viewport = target.clientHeight;
+                target.scrollBy(0, viewport);
+                const afterTop = target.scrollTop;
+                const atEnd =
+                    target.scrollTop + target.clientHeight >= target.scrollHeight - 5;
+                return {
+                    found: true,
+                    did_scroll: afterTop > beforeTop,
+                    at_end: atEnd,
+                };
+            }""",
+            self.RESULTS_PANE_SELECTORS,
+        )
+
+        if not result.get("found"):
+            logger.warning("Results pane scroll target not found")
+            return False, True
+
+        did_scroll = bool(result.get("did_scroll"))
+        at_end = bool(result.get("at_end"))
+        if did_scroll:
+            logger.info("Results pane scrolled")
+        return did_scroll, at_end
+
+    def wait_for_new_cards_after_scroll(
+        self,
+        previous_count: int,
+        *,
+        timeout_ms: int = 10_000,
+    ) -> int:
+        """Wait for additional prospect cards after scrolling the results pane."""
+        import time
+
+        deadline = time.time() + (timeout_ms / 1000)
+        last_count = previous_count
+
+        while time.time() < deadline:
+            self.page.wait_for_timeout(500)
+            try:
+                current = self._find_result_items().count()
+            except Exception:
+                current = last_count
+
+            if current > previous_count:
+                logger.info("New prospects loaded")
+                return current
+
+            last_count = current
+
+        return last_count
+
+    def is_results_pane_at_end(self) -> bool:
+        """Return True when the results pane is scrolled to the bottom."""
+        return bool(
+            self.page.evaluate(
+                """(selectors) => {
+                    function isScrollable(el) {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const oy = style.overflowY;
+                        return (
+                            (oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+                            && el.scrollHeight > el.clientHeight + 10
+                        );
+                    }
+
+                    let target = null;
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (isScrollable(el)) {
+                            target = el;
+                            break;
+                        }
+                    }
+
+                    if (!target) {
+                        const li = document.querySelector(
+                            'ol.artdeco-list li.artdeco-list__item'
+                        );
+                        let node = li ? li.parentElement : null;
+                        while (node && node !== document.body) {
+                            if (isScrollable(node)) {
+                                target = node;
+                                break;
+                            }
+                            node = node.parentElement;
+                        }
+                    }
+
+                    if (!target) return true;
+                    return (
+                        target.scrollTop + target.clientHeight >= target.scrollHeight - 5
+                    );
+                }""",
+                self.RESULTS_PANE_SELECTORS,
+            )
+        )
 
     def _find_result_items(self) -> Locator:
         for selector in self.CARD_SELECTORS:
