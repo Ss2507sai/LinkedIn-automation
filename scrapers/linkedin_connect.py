@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from scrapers.sales_navigator import ProspectCard
-from src.errors import ScrapingError
+from src.errors import InvitationPendingError, ScrapingError
 from src.logger import get_logger
 from src.utils import clean_text, dismiss_linkedin_popups, human_delay
 
@@ -58,6 +59,11 @@ class LinkedInConnectSender:
         'button:has-text("Send invitation")',
     ]
 
+    PENDING_INVITATION_PATTERNS = (
+        re.compile(r"connect\s*[—\-–]\s*pending", re.IGNORECASE),
+        re.compile(r"invitation\s+sent", re.IGNORECASE),
+    )
+
     def __init__(self, page: Page, settings: Settings) -> None:
         self.page = page
         self.settings = settings
@@ -83,6 +89,12 @@ class LinkedInConnectSender:
         self._open_three_dot_menu(card, prospect.name)
         if screenshot_cb:
             screenshot_cb("02_action_menu")
+
+        if self._menu_shows_pending_invitation(card):
+            self._close_open_menu()
+            raise InvitationPendingError(
+                f"Invitation already pending for {prospect.name}"
+            )
 
         self._click_connect(card, prospect.name)
         self.wait_for_send_invitation_modal()
@@ -218,6 +230,20 @@ class LinkedInConnectSender:
                 continue
         raise ScrapingError("Could not click Send invitation")
 
+    def has_pending_invitation(self, prospect: ProspectCard) -> bool:
+        """Open the action menu and detect an already-pending LinkedIn invitation."""
+        dismiss_linkedin_popups(self.page)
+        self.page.bring_to_front()
+
+        card = self._find_prospect_card(prospect)
+        if card is None:
+            return False
+
+        self._open_three_dot_menu(card, prospect.name)
+        pending = self._menu_shows_pending_invitation(card)
+        self._close_open_menu()
+        return pending
+
     def close_dialog(self) -> None:
         for selector in [
             'button[aria-label="Dismiss"]',
@@ -232,6 +258,55 @@ class LinkedInConnectSender:
                     return
             except Exception:
                 continue
+
+    def _menu_shows_pending_invitation(self, card: Locator) -> bool:
+        """Return True when the open action menu shows a pending/sent invitation state."""
+        menu_texts = self._collect_visible_menu_texts(card)
+        return any(self._text_indicates_pending_invitation(text) for text in menu_texts)
+
+    def _collect_visible_menu_texts(self, card: Locator) -> list[str]:
+        menu_texts: list[str] = []
+        scopes = [card, self.page]
+        selectors = [
+            "button",
+            "div.artdeco-dropdown__item",
+            "span.artdeco-dropdown__item-text",
+            '[role="menuitem"]',
+            "a",
+        ]
+
+        for scope in scopes:
+            for selector in selectors:
+                try:
+                    items = scope.locator(selector)
+                    for i in range(items.count()):
+                        item = items.nth(i)
+                        if not item.is_visible(timeout=300):
+                            continue
+                        text = clean_text(item.inner_text(timeout=300))
+                        if text:
+                            menu_texts.append(text)
+                except Exception:
+                    continue
+
+        return menu_texts
+
+    @classmethod
+    def _text_indicates_pending_invitation(cls, text: str) -> bool:
+        normalized = clean_text(text)
+        lowered = normalized.lower()
+        for pattern in cls.PENDING_INVITATION_PATTERNS:
+            if pattern.search(normalized):
+                return True
+        return lowered == "pending"
+
+    def _close_open_menu(self) -> None:
+        try:
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(300)
+        except Exception:
+            pass
+        dismiss_linkedin_popups(self.page)
 
     def _open_three_dot_menu(self, card: Locator, prospect_name: str) -> None:
         for selector in self.MENU_SELECTORS:

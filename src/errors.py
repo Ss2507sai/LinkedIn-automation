@@ -31,3 +31,7 @@ class ParseError(AutomationError):
 
 class PaginationError(AutomationError):
     """Failed to navigate Sales Navigator pagination."""
+
+
+class InvitationPendingError(AutomationError):
+    """LinkedIn invitation is already pending for this prospect."""

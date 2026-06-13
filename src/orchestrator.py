@@ -25,6 +25,7 @@ from src.errors import (
     BrowserConnectionError,
     ChatGPTError,
     ChatGPTTimeoutError,
+    InvitationPendingError,
     ParseError,
     ScrapingError,
     TabNotFoundError,
@@ -252,7 +253,13 @@ class AutomationOrchestrator:
         connect_sender = LinkedInConnectSender(sales_nav_page, self.settings)
         max_attempts = self.settings.retry_count + 1
 
+        if connect_sender.has_pending_invitation(prospect):
+            self._skip_pending_invitation(prospect)
+            return
+
         while True:
+            profile_data: ProfileData | None = None
+            connection_request = ""
             try:
                 for attempt in range(max_attempts):
                     try:
@@ -425,6 +432,24 @@ class AutomationOrchestrator:
                         self._open_current_profile()
                         continue
 
+                    except InvitationPendingError:
+                        if profile_page:
+                            try:
+                                profile_page.close()
+                            except Exception:
+                                pass
+                            profile_page = None
+                        connect_sender.close_dialog()
+                        self._skip_pending_invitation(
+                            prospect,
+                            title=(profile_data.current_job_title if profile_data else prospect.title),
+                            company=(profile_data.company_name if profile_data else prospect.company),
+                            location=(profile_data.location if profile_data else prospect.location),
+                            profile_url=(profile_data.profile_url if profile_data else prospect.profile_url),
+                            connection_request=connection_request,
+                        )
+                        return
+
                     except (
                         ChatGPTError,
                         ChatGPTTimeoutError,
@@ -519,6 +544,42 @@ class AutomationOrchestrator:
         except TabNotFoundError:
             pass
         capture_error_screenshot(error_page, self.settings, f"error_{name}")
+
+    def _skip_pending_invitation(
+        self,
+        prospect: ProspectCard,
+        *,
+        title: str = "",
+        company: str = "",
+        location: str = "",
+        profile_url: str = "",
+        connection_request: str = "",
+    ) -> None:
+        logger.info("Invitation already pending - skipping prospect")
+        resolved_url = profile_url or prospect.profile_url
+        self.storage.save_connection_sent(
+            name=prospect.name,
+            title=title or prospect.title,
+            company=company or prospect.company,
+            location=location or prospect.location,
+            profile_url=resolved_url,
+            connection_request=connection_request,
+        )
+        result = ProspectResult.create(
+            name=prospect.name,
+            title=title or prospect.title,
+            company=company or prospect.company,
+            location=location or prospect.location,
+            profile_url=resolved_url,
+            connection_request=connection_request,
+            status=CONNECTION_SENT,
+        )
+        self.storage.save_success(result, resolved_url, mark_processed=True)
+        self._processed_this_session += 1
+        self.control.update(
+            success_count=self.control.snapshot().success_count + 1,
+            connection_status=CONNECTION_SENT,
+        )
 
     def _record_failure(self, prospect: ProspectCard, exc: Exception) -> None:
         failure = ProspectResult.create(
